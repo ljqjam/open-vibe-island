@@ -497,6 +497,160 @@ final class AppModel {
         watchRelay = nil
     }
 
+    // MARK: - Hi IM Notification
+
+    private static let hiNotificationEnabledKey = "hi.notification.enabled"
+    private static let hiAppIdKey = "hi.notification.appId"
+    private static let hiAppSecretKey = "hi.notification.appSecret"
+    private static let hiAsnIdKey = "hi.notification.asnId"
+    private static let hiRecipientAccountIdKey = "hi.notification.recipientAccountId"
+    private static let hiCardSchemaIdKey = "hi.notification.cardSchemaId"
+    private static let hiInteractiveApprovalKey = "hi.notification.interactiveApproval"
+
+    var hiNotificationEnabled: Bool = false {
+        didSet {
+            guard hiNotificationEnabled != oldValue else { return }
+            UserDefaults.standard.set(hiNotificationEnabled, forKey: Self.hiNotificationEnabledKey)
+            if hiNotificationEnabled {
+                startHiRelay()
+            } else {
+                stopHiRelay()
+            }
+        }
+    }
+
+    var hiAppId: String = "" {
+        didSet {
+            guard hasFinishedInit, hiAppId != oldValue else { return }
+            UserDefaults.standard.set(hiAppId, forKey: Self.hiAppIdKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    var hiAppSecret: String = "" {
+        didSet {
+            guard hasFinishedInit, hiAppSecret != oldValue else { return }
+            UserDefaults.standard.set(hiAppSecret, forKey: Self.hiAppSecretKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    var hiAsnId: String = "" {
+        didSet {
+            guard hasFinishedInit, hiAsnId != oldValue else { return }
+            UserDefaults.standard.set(hiAsnId, forKey: Self.hiAsnIdKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    var hiRecipientAccountId: String = "" {
+        didSet {
+            guard hasFinishedInit, hiRecipientAccountId != oldValue else { return }
+            UserDefaults.standard.set(hiRecipientAccountId, forKey: Self.hiRecipientAccountIdKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    var hiCardSchemaId: String = "" {
+        didSet {
+            guard hasFinishedInit, hiCardSchemaId != oldValue else { return }
+            UserDefaults.standard.set(hiCardSchemaId, forKey: Self.hiCardSchemaIdKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    var hiInteractiveApprovalEnabled: Bool = false {
+        didSet {
+            guard hasFinishedInit, hiInteractiveApprovalEnabled != oldValue else { return }
+            UserDefaults.standard.set(hiInteractiveApprovalEnabled, forKey: Self.hiInteractiveApprovalKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
+    @ObservationIgnored
+    private(set) var hiRelay: HiNotificationRelay?
+
+    @ObservationIgnored
+    private(set) var hiSubscriber: HiEventSubscriber?
+
+    private func startHiRelay() {
+        guard hiRelay == nil,
+              !hiAppId.isEmpty, !hiAppSecret.isEmpty,
+              !hiAsnId.isEmpty, !hiRecipientAccountId.isEmpty else { return }
+        // TODO: appSecret is stored in UserDefaults for now; consider Keychain (SecItemAdd).
+        let config = HiNotificationRelay.Config(
+            appId: hiAppId,
+            appSecret: hiAppSecret,
+            asnId: hiAsnId,
+            recipientAccountId: hiRecipientAccountId,
+            cardSchemaId: hiCardSchemaId
+        )
+        let relay = HiNotificationRelay(config: config)
+        // A Hi reply resolving a permission request is equivalent to clicking the notch
+        // Allow/Deny button. Hop to the MainActor to reuse the existing bridge path.
+        relay.onResolve = { [weak self] sessionID, approved in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let action: ApprovalAction = approved
+                    ? .allowOnce
+                    : .deny
+                self.approvePermission(for: sessionID, action: action)
+            }
+        }
+        relay.start()
+        self.hiRelay = relay
+
+        // Interactive approval requires an outbound WebSocket to receive user replies.
+        if hiInteractiveApprovalEnabled {
+            let subscriberConfig = HiEventSubscriber.Config(
+                appId: hiAppId,
+                appSecret: hiAppSecret
+            )
+            let subscriber = HiEventSubscriber(config: subscriberConfig)
+            subscriber.onReply = { [weak relay] text in
+                relay?.ingestReply(text)
+            }
+            subscriber.start()
+            self.hiSubscriber = subscriber
+        }
+    }
+
+    private func stopHiRelay() {
+        hiSubscriber?.stop()
+        hiSubscriber = nil
+        hiRelay?.stop()
+        hiRelay = nil
+    }
+
+    private func restartHiRelayIfEnabled() {
+        guard hiNotificationEnabled else { return }
+        stopHiRelay()
+        startHiRelay()
+    }
+
+    /// Sends a test message to Hi using the currently entered credentials.
+    /// Returns a human-readable status string for the Settings UI.
+    func sendHiTestMessage() async -> String {
+        guard !hiAppId.isEmpty, !hiAppSecret.isEmpty,
+              !hiAsnId.isEmpty, !hiRecipientAccountId.isEmpty else {
+            return "请先填写全部字段"
+        }
+        let config = HiNotificationRelay.Config(
+            appId: hiAppId,
+            appSecret: hiAppSecret,
+            asnId: hiAsnId,
+            recipientAccountId: hiRecipientAccountId,
+            cardSchemaId: hiCardSchemaId
+        )
+        let relay = HiNotificationRelay(config: config)
+        do {
+            try await relay.sendTestMessage()
+            return "发送成功 ✅"
+        } catch {
+            return "发送失败: \(error.localizedDescription)"
+        }
+    }
+
     var ignoresPointerExitDuringHarness = false
     var disablesOverlayEventMonitoringDuringHarness = false
 
@@ -618,6 +772,16 @@ final class AppModel {
         watchNotificationEnabled = UserDefaults.standard.bool(forKey: Self.watchNotificationEnabledKey)
         if watchNotificationEnabled {
             startWatchRelay()
+        }
+        hiNotificationEnabled = UserDefaults.standard.bool(forKey: Self.hiNotificationEnabledKey)
+        hiAppId = UserDefaults.standard.string(forKey: Self.hiAppIdKey) ?? ""
+        hiAppSecret = UserDefaults.standard.string(forKey: Self.hiAppSecretKey) ?? ""
+        hiAsnId = UserDefaults.standard.string(forKey: Self.hiAsnIdKey) ?? ""
+        hiRecipientAccountId = UserDefaults.standard.string(forKey: Self.hiRecipientAccountIdKey) ?? ""
+        hiCardSchemaId = UserDefaults.standard.string(forKey: Self.hiCardSchemaIdKey) ?? ""
+        hiInteractiveApprovalEnabled = UserDefaults.standard.bool(forKey: Self.hiInteractiveApprovalKey)
+        if hiNotificationEnabled {
+            startHiRelay()
         }
 
         overlay.appModel = self
@@ -1364,6 +1528,7 @@ final class AppModel {
 
         let resolution = permissionResolution(for: approved)
         dismissNotificationSurfaceIfPresent(for: sessionID)
+        hiRelay?.forgetApproval(sessionID: sessionID)
         state.resolvePermission(sessionID: session.id, resolution: resolution)
         synchronizeSelection()
         refreshOverlayPlacementIfVisible()
@@ -1397,6 +1562,7 @@ final class AppModel {
         }
 
         dismissNotificationSurfaceIfPresent(for: sessionID)
+        hiRelay?.forgetApproval(sessionID: sessionID)
         state.resolvePermission(sessionID: session.id, resolution: resolution)
         synchronizeSelection()
         refreshOverlayPlacementIfVisible()
@@ -1531,6 +1697,21 @@ final class AppModel {
             }()
             let session = eventSessionID.flatMap { state.session(id: $0) }
             relay.notifyEvent(event, session: session)
+        }
+
+        // Push relevant events to Hi IM via the relay
+        if let hiRelay {
+            let hiSessionID: String? = {
+                switch event {
+                case let .permissionRequested(p): return p.sessionID
+                case let .questionAsked(p): return p.sessionID
+                case let .sessionCompleted(p): return p.sessionID
+                default: return nil
+                }
+            }()
+            if let hiSessionID {
+                hiRelay.notifyEvent(event, session: state.session(id: hiSessionID))
+            }
         }
 
         if updateLastActionMessage {
