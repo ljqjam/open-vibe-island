@@ -189,6 +189,7 @@ public final class HiEventSubscriber: @unchecked Sendable {
             return
         }
 
+        Self.logger.info("Hi WebSocket reply received: \(replyText, privacy: .public)")
         onReply?(replyText)
     }
 

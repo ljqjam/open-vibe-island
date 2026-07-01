@@ -178,7 +178,11 @@ public final class HiNotificationRelay: @unchecked Sendable {
             return entry.value.sessionID
         }
 
-        guard let sessionID = resolved else { return }
+        guard let sessionID = resolved else {
+            Self.logger.info("Hi reply '\(trimmed, privacy: .public)' matched no pending approval")
+            return
+        }
+        Self.logger.info("Hi reply resolving session \(sessionID, privacy: .public) approved=\(approved, privacy: .public)")
         onResolve?(sessionID, approved)
     }
 
