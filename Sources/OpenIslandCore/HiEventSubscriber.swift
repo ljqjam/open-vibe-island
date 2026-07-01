@@ -169,9 +169,23 @@ public final class HiEventSubscriber: @unchecked Sendable {
         // ACK first so the server keeps delivering (3s window).
         sendAck(eventType: eventType, eventId: eventId, on: task)
 
-        guard eventType == Self.chatMessageEventType,
-              let payloadJson = outer["payloadJson"] as? String,
-              let replyText = Self.extractText(fromPayloadJson: payloadJson) else {
+        guard eventType == Self.chatMessageEventType else { return }
+
+        // The event payload arrives either as a nested object (`payload`) or, per some
+        // docs, as a JSON string (`payloadJson`). Support both.
+        let payload: [String: Any]?
+        if let object = outer["payload"] as? [String: Any] {
+            payload = object
+        } else if let json = outer["payloadJson"] as? String,
+                  let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] {
+            payload = object
+        } else {
+            payload = nil
+        }
+
+        guard let payload,
+              !Self.isFromBot(payload),
+              let replyText = Self.extractText(fromPayload: payload) else {
             return
         }
 
@@ -192,16 +206,32 @@ public final class HiEventSubscriber: @unchecked Sendable {
         }
     }
 
-    /// Extracts `imMessage.data.text` from a chat-message event payload.
-    private static func extractText(fromPayloadJson payloadJson: String) -> String? {
-        guard let payload = try? JSONSerialization.jsonObject(with: Data(payloadJson.utf8)) as? [String: Any],
-              let imMessage = payload["imMessage"] as? [String: Any],
+    /// True when the message was authored by the application robot itself (avoid echoes).
+    private static func isFromBot(_ payload: [String: Any]) -> Bool {
+        guard let imMessage = payload["imMessage"] as? [String: Any],
+              let creator = imMessage["creatorContactId"] as? String,
+              let asn = payload["asn"] as? [String: Any],
+              let asnAccount = asn["accountId"] as? String else {
+            return false
+        }
+        return creator == asnAccount
+    }
+
+    /// Extracts the reply text from a chat-message event payload. Supports both the
+    /// `{"plainText":{"text":..}}` shape (observed) and the flat `{"text":..}` shape (docs).
+    private static func extractText(fromPayload payload: [String: Any]) -> String? {
+        guard let imMessage = payload["imMessage"] as? [String: Any],
               let dataString = imMessage["data"] as? String,
-              let inner = try? JSONSerialization.jsonObject(with: Data(dataString.utf8)) as? [String: Any],
-              let text = inner["text"] as? String else {
+              let inner = try? JSONSerialization.jsonObject(with: Data(dataString.utf8)) as? [String: Any] else {
             return nil
         }
-        return text
+        if let plain = inner["plainText"] as? [String: Any], let text = plain["text"] as? String {
+            return text
+        }
+        if let text = inner["text"] as? String {
+            return text
+        }
+        return nil
     }
 
     private func scheduleReconnect(after closedTask: URLSessionWebSocketTask) {
