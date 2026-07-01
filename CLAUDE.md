@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project
 
 Open Island — native macOS companion for AI coding agents. Sits in the notch / top bar, monitors local sessions, surfaces permission and question events, and jumps back to the right terminal/IDE. Local-first, no server.
@@ -16,9 +18,21 @@ One Swift package (`OpenIsland`), four targets:
 - **OpenIslandHooks** — CLI invoked by agent hooks. Forwards stdin payload → bridge.
 - **OpenIslandSetup** — Installer CLI for agent config files.
 
+Plus an iOS/watchOS companion under `ios/` (separate Xcode project, not part of the Swift package).
+
 Data flow: `agent hook → OpenIslandHooks (stdin) → Unix socket → BridgeServer → AppModel → UI`. On launch: registry restore → JSONL transcript discovery → reconcile with active processes → live bridge.
 
+Bridge socket: `~/Library/Application Support/OpenIsland/bridge.sock` (legacy fallback: `/tmp/open-island-<uid>.sock`). Override with `OPEN_ISLAND_SOCKET_PATH`.
+
 Requires macOS 14+, Swift 6.2.
+
+### Session liveness model
+
+Three distinct modes — don't conflate them:
+
+1. **Hook-managed** (`isHookManaged = true`) — session lifecycle driven by `SessionStart` / `SessionEnd` hooks. Process polling is a safety fallback (marks ended after 2 missed polls) in case `SessionEnd` never arrives.
+2. **Codex.app** (`isCodexAppSession = true`) — liveness tied to `NSRunningApplication`, not hook events. Set when `jumpTarget.terminalApp == "Codex.app"`. Once classified, never downgraded.
+3. **Process-discovery** (default) — `isProcessAlive` toggled by polling; session removed after 2 consecutive missed polls.
 
 ## Build & run
 
@@ -29,7 +43,16 @@ swift run OpenIslandApp                            # canonical dev runtime
 swift build -c release --product OpenIslandHooks
 ```
 
+Run a single test by name:
+
+```bash
+swift test --filter SessionStateTests
+swift test --filter "SessionStateTests/testPermissionRequestClearsOnResolution"
+```
+
 For Xcode: open `Package.swift`.
+
+The iOS/watchOS companion lives under `ios/` — `OpenIslandMobile.xcodeproj` with targets `OpenIslandMobile` (iOS) and `OpenIslandWatch` (watchOS). It connects to the macOS app via `WatchSessionManager` / `WatchHTTPEndpoint`. Build it with Xcode, not `swift build`.
 
 ## Dev app (Open Island Dev.app)
 
@@ -73,6 +96,9 @@ The project is past MVP and welcomes new ideas and creative directions, but the 
 - All models `Sendable` + `Codable`.
 - Hooks **fail open** — if app/bridge is down, the agent runs unchanged.
 - Native macOS APIs over cross-platform abstractions. Small end-to-end slices over speculative scaffolding.
+- Set `OPEN_ISLAND_SKIP_HOOKS=1` on a child agent process to bypass Open Island hook handling entirely (used when another controller owns permission brokering for that run).
+- Tests use **Swift Testing** (`import Testing`, `@Test`, `#expect`) — not XCTest.
+- For bridge scenario replay during debugging: `python3 scripts/replay-bridge-scenarios.py`.
 
 ## Key files
 
