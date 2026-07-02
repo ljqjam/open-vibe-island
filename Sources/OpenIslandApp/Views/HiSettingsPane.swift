@@ -105,6 +105,19 @@ struct HiSettingsPane: View {
                 }
 
                 Section {
+                    Toggle("仅锁屏时推送", isOn: Binding(
+                        get: { model.hiLockedOnly },
+                        set: { model.hiLockedOnly = $0 }
+                    ))
+                } header: {
+                    Text("Delivery")
+                } footer: {
+                    Text("开启后，屏幕解锁（你在电脑前）时不推送 Hi，改用刘海 UI；仅在锁屏后才推送 Hi 通知。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
                     HStack {
                         Button {
                             sendTest()

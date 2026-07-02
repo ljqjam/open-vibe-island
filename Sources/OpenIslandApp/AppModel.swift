@@ -507,6 +507,7 @@ final class AppModel {
     private static let hiCardSchemaIdKey = "hi.notification.cardSchemaId"
     private static let hiUserAccessTokenKey = "hi.notification.userAccessToken"
     private static let hiInteractiveApprovalKey = "hi.notification.interactiveApproval"
+    private static let hiLockedOnlyKey = "hi.notification.lockedOnly"
 
     var hiNotificationEnabled: Bool = false {
         didSet {
@@ -574,6 +575,44 @@ final class AppModel {
             UserDefaults.standard.set(hiInteractiveApprovalEnabled, forKey: Self.hiInteractiveApprovalKey)
             restartHiRelayIfEnabled()
         }
+    }
+
+    /// When true, Hi pushes are suppressed while the screen is unlocked (the user is
+    /// present and the notch UI is sufficient) and only sent while the screen is locked.
+    /// Evaluated at push time, so no relay restart is needed on change.
+    var hiLockedOnly: Bool = false {
+        didSet {
+            guard hasFinishedInit, hiLockedOnly != oldValue else { return }
+            UserDefaults.standard.set(hiLockedOnly, forKey: Self.hiLockedOnlyKey)
+        }
+    }
+
+    /// Current screen-lock state, tracked via distributed notifications. Used to gate
+    /// Hi pushes when `hiLockedOnly` is enabled.
+    @ObservationIgnored
+    private(set) var isScreenLocked: Bool = false
+
+    @ObservationIgnored
+    private var screenLockObservers: [NSObjectProtocol] = []
+
+    private func startScreenLockMonitoring() {
+        guard screenLockObservers.isEmpty else { return }
+        let center = DistributedNotificationCenter.default()
+        let locked = center.addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.isScreenLocked = true }
+        }
+        let unlocked = center.addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.isScreenLocked = false }
+        }
+        screenLockObservers = [locked, unlocked]
     }
 
     @ObservationIgnored
@@ -792,6 +831,8 @@ final class AppModel {
         hiCardSchemaId = UserDefaults.standard.string(forKey: Self.hiCardSchemaIdKey) ?? ""
         hiUserAccessToken = UserDefaults.standard.string(forKey: Self.hiUserAccessTokenKey) ?? ""
         hiInteractiveApprovalEnabled = UserDefaults.standard.bool(forKey: Self.hiInteractiveApprovalKey)
+        hiLockedOnly = UserDefaults.standard.bool(forKey: Self.hiLockedOnlyKey)
+        startScreenLockMonitoring()
         if hiNotificationEnabled {
             startHiRelay()
         }
@@ -1711,8 +1752,9 @@ final class AppModel {
             relay.notifyEvent(event, session: session)
         }
 
-        // Push relevant events to Hi IM via the relay
-        if let hiRelay {
+        // Push relevant events to Hi IM via the relay. When "locked-only" is enabled,
+        // suppress pushes while the screen is unlocked (the user is present).
+        if let hiRelay, !(hiLockedOnly && !isScreenLocked) {
             let hiSessionID: String? = {
                 switch event {
                 case let .permissionRequested(p): return p.sessionID
