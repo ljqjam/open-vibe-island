@@ -505,6 +505,7 @@ final class AppModel {
     private static let hiAsnIdKey = "hi.notification.asnId"
     private static let hiRecipientAccountIdKey = "hi.notification.recipientAccountId"
     private static let hiCardSchemaIdKey = "hi.notification.cardSchemaId"
+    private static let hiUserAccessTokenKey = "hi.notification.userAccessToken"
     private static let hiInteractiveApprovalKey = "hi.notification.interactiveApproval"
 
     var hiNotificationEnabled: Bool = false {
@@ -559,6 +560,14 @@ final class AppModel {
         }
     }
 
+    var hiUserAccessToken: String = "" {
+        didSet {
+            guard hasFinishedInit, hiUserAccessToken != oldValue else { return }
+            UserDefaults.standard.set(hiUserAccessToken, forKey: Self.hiUserAccessTokenKey)
+            restartHiRelayIfEnabled()
+        }
+    }
+
     var hiInteractiveApprovalEnabled: Bool = false {
         didSet {
             guard hasFinishedInit, hiInteractiveApprovalEnabled != oldValue else { return }
@@ -583,7 +592,8 @@ final class AppModel {
             appSecret: hiAppSecret,
             asnId: hiAsnId,
             recipientAccountId: hiRecipientAccountId,
-            cardSchemaId: hiCardSchemaId
+            cardSchemaId: hiCardSchemaId,
+            userAccessToken: hiUserAccessToken
         )
         let relay = HiNotificationRelay(config: config)
         // A Hi reply resolving a permission request is equivalent to clicking the notch
@@ -640,7 +650,8 @@ final class AppModel {
             appSecret: hiAppSecret,
             asnId: hiAsnId,
             recipientAccountId: hiRecipientAccountId,
-            cardSchemaId: hiCardSchemaId
+            cardSchemaId: hiCardSchemaId,
+            userAccessToken: hiUserAccessToken
         )
         let relay = HiNotificationRelay(config: config)
         do {
@@ -779,6 +790,7 @@ final class AppModel {
         hiAsnId = UserDefaults.standard.string(forKey: Self.hiAsnIdKey) ?? ""
         hiRecipientAccountId = UserDefaults.standard.string(forKey: Self.hiRecipientAccountIdKey) ?? ""
         hiCardSchemaId = UserDefaults.standard.string(forKey: Self.hiCardSchemaIdKey) ?? ""
+        hiUserAccessToken = UserDefaults.standard.string(forKey: Self.hiUserAccessTokenKey) ?? ""
         hiInteractiveApprovalEnabled = UserDefaults.standard.bool(forKey: Self.hiInteractiveApprovalKey)
         if hiNotificationEnabled {
             startHiRelay()

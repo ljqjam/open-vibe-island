@@ -13,6 +13,15 @@ public final class HiNotificationRelay: @unchecked Sendable {
     /// API alias for "应用号发送消息到个人 (V2)" — only requires an AppAccessToken.
     private static let sendMessageAlias = "redcity:asn.asnSendMessageToPerson:v2"
 
+    /// API alias for "应用号发送卡片消息到会话 (For Open)" — the only path that renders
+    /// interactive cards to a person. Requires both AppAccessToken *and* UserAccessToken.
+    /// (`asnSendMessageToPerson` with messageType=13 does not support personal cards.)
+    private static let sendCardToChatAlias = "redcity:asn.asnSendCardMessageToChatForOpen:v1"
+
+    /// API alias for querying a single-chat's messages — used only to resolve the
+    /// single-chat `chatId` between the 应用号 and the recipient. AppAccessToken only.
+    private static let queryChatAlias = "redcity:asn.pageQueryAsnChatMessageList:v1"
+
     /// Refresh the AppAccessToken when fewer than this many seconds remain.
     private static let tokenRefreshLeadTime: TimeInterval = 30 * 60
 
@@ -31,6 +40,10 @@ public final class HiNotificationRelay: @unchecked Sendable {
         /// Optional card template ID (schemaId). When empty, permission requests are
         /// sent as plain text instead of a card.
         public var cardSchemaId: String
+        /// UserAccessToken of the 应用号 owner. Required to send interactive cards via
+        /// `asnSendCardMessageToChatForOpen`. When empty, permission requests fall back
+        /// to plain text even if a `cardSchemaId` is set.
+        public var userAccessToken: String
         public var baseURL: String
 
         public init(
@@ -39,6 +52,7 @@ public final class HiNotificationRelay: @unchecked Sendable {
             asnId: String,
             recipientAccountId: String,
             cardSchemaId: String = "",
+            userAccessToken: String = "",
             baseURL: String = "https://redcity-open.xiaohongshu.com"
         ) {
             self.appId = appId
@@ -46,6 +60,7 @@ public final class HiNotificationRelay: @unchecked Sendable {
             self.asnId = asnId
             self.recipientAccountId = recipientAccountId
             self.cardSchemaId = cardSchemaId
+            self.userAccessToken = userAccessToken
             self.baseURL = baseURL
         }
     }
@@ -72,6 +87,9 @@ public final class HiNotificationRelay: @unchecked Sendable {
     private var cachedToken: String?
     private var tokenExpiresAt: Date = .distantPast
     private var isStopped = false
+    /// Resolved single-chat chatId between the 应用号 and the recipient — guarded by
+    /// `queue`. Cached for the relay's lifetime (a new recipient recreates the relay).
+    private var cachedChatId: String?
 
     // Permission requests awaiting a Hi reply, keyed by a short code — guarded by `queue`.
     private var pendingApprovals: [String: PendingApproval] = [:]
@@ -291,7 +309,7 @@ public final class HiNotificationRelay: @unchecked Sendable {
         textLines.append("回复 y 批准 / n 拒绝（多条待审批时回复: y \(code)）")
         let fallbackText = textLines.joined(separator: "\n")
 
-        if !config.cardSchemaId.isEmpty {
+        if !config.cardSchemaId.isEmpty, !config.userAccessToken.isEmpty {
             do {
                 try await sendCard(
                     tool: tool,
@@ -319,9 +337,11 @@ public final class HiNotificationRelay: @unchecked Sendable {
         )
     }
 
-    /// Builds and sends a static card message (messageType=13). The card renders
-    /// `title`/`content`/`code` via template variables and its `sendMessage` buttons
-    /// emit `y`/`n` so the reply flows back through the WebSocket subscriber.
+    /// Builds and sends an interactive card to the single-chat between the 应用号 and
+    /// the recipient via `asnSendCardMessageToChatForOpen`. The card's `sendMessage`
+    /// buttons emit `y`/`n` (+ short code) as chat messages that flow back through the
+    /// WebSocket subscriber. Requires a `userAccessToken`; resolves and caches the
+    /// single-chat `chatId` on first use.
     private func sendCard(
         tool: String,
         title: String,
@@ -330,6 +350,13 @@ public final class HiNotificationRelay: @unchecked Sendable {
         abbrev: String,
         config: Config
     ) async throws {
+        if queue.sync(execute: { isStopped }) { return }
+        guard !config.userAccessToken.isEmpty else {
+            throw HiRelayError.server("缺少 userAccessToken，无法发送卡片")
+        }
+
+        let chatId = try await fetchOrRefreshChatId(config: config)
+
         let entityData: [String: Any] = [
             "tool": tool,
             "title": title,
@@ -341,24 +368,49 @@ public final class HiNotificationRelay: @unchecked Sendable {
             throw HiRelayError.invalidRequest
         }
 
-        let cardContent: [String: Any] = [
-            "entitySchemaId": config.cardSchemaId,
-            "type": 1,
-            "dataSourceType": 1,
-            "subject": title,
+        let bizParams: [String: Any] = [
+            "chatId": chatId,
+            "cardSchemaId": config.cardSchemaId,
             "entityData": entityDataString,
+            "messageAbbrevContent": abbrev,
+            "businessId": UUID().uuidString,
+            "allowedConfirmAccountIdList": [config.recipientAccountId],
         ]
-        guard let cardData = try? JSONSerialization.data(withJSONObject: cardContent),
-              let cardString = String(data: cardData, encoding: .utf8) else {
-            throw HiRelayError.invalidRequest
-        }
 
-        try await sendRaw(
-            messageType: .card,
-            messageContent: cardString,
-            abbrev: abbrev,
-            config: config
+        _ = try await callGateway(
+            alias: Self.sendCardToChatAlias,
+            bizParams: bizParams,
+            config: config,
+            requiresUserToken: true
         )
+    }
+
+    /// Resolves (and caches) the single-chat `chatId` between the 应用号 and the
+    /// recipient by reading the chat's message list. AppAccessToken only.
+    private func fetchOrRefreshChatId(config: Config) async throws -> String {
+        if let cached = queue.sync(execute: { cachedChatId }) { return cached }
+
+        let bizParams: [String: Any] = [
+            "asnId": config.asnId,
+            "asnChatRelateAccountId": config.recipientAccountId,
+            "startSeq": 0,
+            "endSeq": 9_999_999_999,
+            "limit": 1,
+            "order": 1,
+        ]
+        let inner = try await callGateway(
+            alias: Self.queryChatAlias,
+            bizParams: bizParams,
+            config: config,
+            requiresUserToken: false
+        )
+        guard let result = inner["asnChatMessageResult"] as? [String: Any],
+              let chat = result["imChat"] as? [String: Any],
+              let chatId = chat["chatId"] as? String, !chatId.isEmpty else {
+            throw HiRelayError.invalidResponse
+        }
+        queue.sync { cachedChatId = chatId }
+        return chatId
     }
 
     private func sendRaw(
@@ -368,8 +420,6 @@ public final class HiNotificationRelay: @unchecked Sendable {
         config: Config
     ) async throws {
         if queue.sync(execute: { isStopped }) { return }
-
-        let token = try await fetchOrRefreshToken(config: config)
 
         let bizParams: [String: Any] = [
             "asnId": config.asnId,
@@ -381,17 +431,44 @@ public final class HiNotificationRelay: @unchecked Sendable {
             "messageSource": 1,
         ]
 
+        _ = try await callGateway(
+            alias: Self.sendMessageAlias,
+            bizParams: bizParams,
+            config: config,
+            requiresUserToken: false
+        )
+    }
+
+    /// Performs a generic Hi OpenAPI gateway call and returns the inner business JSON
+    /// object. The gateway wraps the real business result as a JSON *string* in `data`;
+    /// the outer `success` only reflects transport-level success, so the actual result
+    /// must be parsed from the nested payload. Throws on any transport or business error.
+    @discardableResult
+    private func callGateway(
+        alias: String,
+        bizParams: [String: Any],
+        config: Config,
+        requiresUserToken: Bool
+    ) async throws -> [String: Any] {
+        let token = try await fetchOrRefreshToken(config: config)
+
         guard let bizParamsData = try? JSONSerialization.data(withJSONObject: bizParams),
               let bizParamsString = String(data: bizParamsData, encoding: .utf8) else {
             throw HiRelayError.invalidRequest
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "appId": config.appId,
             "appAccessToken": token,
-            "apiAlias": Self.sendMessageAlias,
+            "apiAlias": alias,
             "bizParams": bizParamsString,
         ]
+        if requiresUserToken {
+            guard !config.userAccessToken.isEmpty else {
+                throw HiRelayError.server("缺少 userAccessToken")
+            }
+            body["userAccessToken"] = config.userAccessToken
+        }
 
         guard let request = makeRequest(
             path: "/openapis/open/api/call/v2",
@@ -402,9 +479,6 @@ public final class HiNotificationRelay: @unchecked Sendable {
         }
 
         let (data, _) = try await session.data(for: request)
-        // The gateway wraps the real business result as a JSON *string* in `data`.
-        // The outer `success` only reflects transport-level success, so the actual
-        // send result must be parsed from the nested payload.
         guard let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw HiRelayError.invalidResponse
         }
@@ -418,10 +492,11 @@ public final class HiNotificationRelay: @unchecked Sendable {
             throw HiRelayError.invalidResponse
         }
         guard (inner["success"] as? Bool) == true else {
-            let msg = (inner["msg"] as? String) ?? "send failed"
+            let msg = (inner["msg"] as? String) ?? "call failed"
             let code = inner["code"].map { "\($0)" } ?? ""
             throw HiRelayError.server(code.isEmpty ? msg : "\(msg) (code \(code))")
         }
+        return inner
     }
 
     /// Returns a cached AppAccessToken when still valid, otherwise fetches a new one.
