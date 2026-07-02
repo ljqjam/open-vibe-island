@@ -114,4 +114,63 @@ struct HiNotificationRelayTests {
         relay.ingestReply("y")
         #expect(called == false)
     }
+
+    // MARK: - ingestReply sender routing (shared robot / multi-user)
+
+    @Test
+    func ingestReplyIgnoresReplyFromDifferentSender() {
+        let relay = makeRelay()
+        relay.registerPendingApproval(code: "a3f9", sessionID: "sess-1", recipient: "alice@xiaohongshu.com")
+
+        var called = false
+        relay.onResolve = { _, _ in called = true }
+        // Bob replies to a request addressed to Alice -> must be ignored.
+        relay.ingestReply("y", from: "bob@xiaohongshu.com")
+        #expect(called == false)
+    }
+
+    @Test
+    func ingestReplyResolvesWhenSenderMatchesRecipient() async {
+        let relay = makeRelay()
+        relay.registerPendingApproval(code: "a3f9", sessionID: "sess-1", recipient: "alice@xiaohongshu.com")
+
+        let resolved = await withCheckedContinuation { (continuation: CheckedContinuation<(String, Bool), Never>) in
+            relay.onResolve = { sessionID, approved in
+                continuation.resume(returning: (sessionID, approved))
+            }
+            relay.ingestReply("y", from: "alice@xiaohongshu.com")
+        }
+        #expect(resolved.0 == "sess-1")
+        #expect(resolved.1 == true)
+    }
+
+    @Test
+    func ingestReplyByCodeIgnoredWhenSenderMismatch() {
+        let relay = makeRelay()
+        relay.registerPendingApproval(code: "aaaa", sessionID: "sess-a", recipient: "alice@xiaohongshu.com")
+        relay.registerPendingApproval(code: "bbbb", sessionID: "sess-b", recipient: "bob@xiaohongshu.com")
+
+        var called = false
+        relay.onResolve = { _, _ in called = true }
+        // Alice tries to resolve Bob's code -> ignored (sender mismatch on that code).
+        relay.ingestReply("y bbbb", from: "alice@xiaohongshu.com")
+        #expect(called == false)
+    }
+
+    @Test
+    func ingestReplyResolvesPerSenderSinglePendingAmongMany() async {
+        let relay = makeRelay()
+        relay.registerPendingApproval(code: "aaaa", sessionID: "sess-a", recipient: "alice@xiaohongshu.com")
+        relay.registerPendingApproval(code: "bbbb", sessionID: "sess-b", recipient: "bob@xiaohongshu.com")
+
+        // Alice has exactly one pending for her; a bare "y" should resolve only hers.
+        let resolved = await withCheckedContinuation { (continuation: CheckedContinuation<(String, Bool), Never>) in
+            relay.onResolve = { sessionID, approved in
+                continuation.resume(returning: (sessionID, approved))
+            }
+            relay.ingestReply("y", from: "alice@xiaohongshu.com")
+        }
+        #expect(resolved.0 == "sess-a")
+        #expect(resolved.1 == true)
+    }
 }

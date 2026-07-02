@@ -54,6 +54,10 @@ public final class HiNotificationRelay: @unchecked Sendable {
     private struct PendingApproval {
         var sessionID: String
         var createdAt: Date
+        /// The Hi account this request was pushed to. Used to ensure only that same
+        /// person's reply can resolve it (prevents cross-talk when several people
+        /// share one 应用号/robot).
+        var recipient: String
     }
 
     /// Invoked when an incoming Hi reply resolves a pending permission request.
@@ -104,7 +108,11 @@ public final class HiNotificationRelay: @unchecked Sendable {
             let sessionID = payload.sessionID
             let code = Self.makeCode()
             queue.sync {
-                pendingApprovals[code] = PendingApproval(sessionID: sessionID, createdAt: .now)
+                pendingApprovals[code] = PendingApproval(
+                    sessionID: sessionID,
+                    createdAt: .now,
+                    recipient: self.config.recipientAccountId
+                )
             }
 
             var detailLines: [String] = []
@@ -159,19 +167,35 @@ public final class HiNotificationRelay: @unchecked Sendable {
     /// Handles a plain-text reply received from Hi (typed by the user or emitted by a
     /// card `sendMessage` button). Resolves a matching pending permission request and
     /// invokes `onResolve`. No-op when the reply cannot be interpreted or matched.
-    public func ingestReply(_ text: String) {
+    ///
+    /// - Parameter sender: the Hi account that authored the reply (`creatorContactId`).
+    ///   When known, only approvals that were pushed to that same account can be
+    ///   resolved, so multiple people sharing one 应用号/robot never resolve each
+    ///   other's requests. Pass `nil` to skip the check (single-user setups/tests).
+    public func ingestReply(_ text: String, from sender: String? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let approved = Self.interpretDecision(trimmed) else { return }
 
         let code = Self.extractCode(trimmed)
         let resolved: String? = queue.sync {
-            if let code, let pending = pendingApprovals[code] {
+            // Only a reply from the account the request was pushed to may resolve it.
+            // When either side is unknown, don't block (best-effort single-user path).
+            func matchesSender(_ pending: PendingApproval) -> Bool {
+                guard let sender, !sender.isEmpty, !pending.recipient.isEmpty else { return true }
+                return pending.recipient == sender
+            }
+
+            if let code {
+                guard let pending = pendingApprovals[code], matchesSender(pending) else {
+                    return nil
+                }
                 pendingApprovals.removeValue(forKey: code)
                 return pending.sessionID
             }
-            // No explicit code: only act when exactly one request is pending, to avoid
-            // resolving the wrong one.
-            guard pendingApprovals.count == 1, let entry = pendingApprovals.first else {
+            // No explicit code: only act when exactly one request is pending *for this
+            // sender*, to avoid resolving the wrong one.
+            let candidates = pendingApprovals.filter { matchesSender($0.value) }
+            guard candidates.count == 1, let entry = candidates.first else {
                 return nil
             }
             pendingApprovals.removeValue(forKey: entry.key)
@@ -199,9 +223,13 @@ public final class HiNotificationRelay: @unchecked Sendable {
     }
 
     /// Registers a pending approval directly. Test seam for `ingestReply`.
-    func registerPendingApproval(code: String, sessionID: String) {
+    func registerPendingApproval(code: String, sessionID: String, recipient: String = "") {
         queue.sync {
-            pendingApprovals[code] = PendingApproval(sessionID: sessionID, createdAt: .now)
+            pendingApprovals[code] = PendingApproval(
+                sessionID: sessionID,
+                createdAt: .now,
+                recipient: recipient
+            )
         }
     }
 

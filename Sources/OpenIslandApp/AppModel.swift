@@ -607,8 +607,8 @@ final class AppModel {
                 appSecret: hiAppSecret
             )
             let subscriber = HiEventSubscriber(config: subscriberConfig)
-            subscriber.onReply = { [weak relay] text in
-                relay?.ingestReply(text)
+            subscriber.onReply = { [weak relay] text, sender in
+                relay?.ingestReply(text, from: sender)
             }
             subscriber.start()
             self.hiSubscriber = subscriber

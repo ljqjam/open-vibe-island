@@ -44,9 +44,10 @@ public final class HiEventSubscriber: @unchecked Sendable {
         }
     }
 
-    /// Called with the plain text of each incoming single-chat message. May be invoked
-    /// on an arbitrary background thread; consumers should hop to their own executor.
-    public var onReply: ((String) -> Void)?
+    /// Called with the plain text of each incoming single-chat message and the account
+    /// that authored it (`creatorContactId`, may be nil). May be invoked on an arbitrary
+    /// background thread; consumers should hop to their own executor.
+    public var onReply: ((_ text: String, _ sender: String?) -> Void)?
 
     private let config: Config
     private let session: URLSession
@@ -190,7 +191,7 @@ public final class HiEventSubscriber: @unchecked Sendable {
         }
 
         Self.logger.info("Hi WebSocket reply received: \(replyText, privacy: .public)")
-        onReply?(replyText)
+        onReply?(replyText, Self.extractSender(fromPayload: payload))
     }
 
     private func sendAck(eventType: String, eventId: String?, on task: URLSessionWebSocketTask) {
@@ -233,6 +234,17 @@ public final class HiEventSubscriber: @unchecked Sendable {
             return text
         }
         return nil
+    }
+
+    /// Extracts the author (`creatorContactId`) of a chat-message event, used to route
+    /// the reply back to only the pending approval that was pushed to that same account.
+    private static func extractSender(fromPayload payload: [String: Any]) -> String? {
+        guard let imMessage = payload["imMessage"] as? [String: Any],
+              let creator = imMessage["creatorContactId"] as? String,
+              !creator.isEmpty else {
+            return nil
+        }
+        return creator
     }
 
     private func scheduleReconnect(after closedTask: URLSessionWebSocketTask) {

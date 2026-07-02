@@ -90,7 +90,7 @@ struct HiSettingsPane: View {
                     Text("Interactive Approval")
                 } footer: {
                     if model.hiInteractiveApprovalEnabled {
-                        Text("需在控制台「应用号 AI → 事件订阅」选 WebSocket、订阅 `asn:bot.chat.message:v1` 并发布。之后在 Hi 里回复 y 批准 / n 拒绝（多条待审批时回复: y <短码>）。填了卡片模板 ID 会推送带按钮的卡片，否则用纯文本。")
+                        Text("需在控制台「应用号 AI → 事件订阅」选 WebSocket、订阅 `asn:bot.chat.message:v1` 并发布。之后在 Hi 里回复 y 批准 / n 拒绝（多条待审批时回复: y <短码>）。填了卡片模板 ID 会推送带按钮的卡片，否则用纯文本。多人共用同一机器人时，只有「审批推送的接收人」本人回复才会被采纳，不会互相串。")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

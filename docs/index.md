@@ -14,6 +14,7 @@ This index is the repository map for humans and coding agents. Read these files 
 - [docs/worktree-workflow.md](./worktree-workflow.md) for the parallel worktree lifecycle
 - [docs/packaging.md](./packaging.md) for the current local app packaging, signing, and notarization path
 - [docs/releasing.md](./releasing.md) for the GitHub release workflow, bilingual notes template, and checklist
+- [docs/第三方安装配置指南.md](./第三方安装配置指南.md) for the third-party install and Hi in-chat approval setup checklist
 
 ## Hooks
 
